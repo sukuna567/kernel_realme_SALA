@@ -11,6 +11,13 @@
  * GNU General Public License for more details.
  */
 
+/* PATCHED by ChatGPT: FB_DVFS disabled by default; prevent downclocking; disable freq clamps by default.
+ * Purpose: help raise and stabilize FPS by biasing GPU DVFS to higher/stable frequencies.
+ * NOTE: This increases power/heat. Use with caution.
+ */
+
+
+
 #ifdef GED_DVFS_STRESS_TEST
 #include<linux/random.h>
 #endif
@@ -90,6 +97,23 @@ static unsigned int g_last_def_commit_freq_id;
 static unsigned int g_cust_upbound_freq_id;
 static unsigned int g_cust_boost_freq_id;
 static unsigned int g_computed_freq_id;
+
+/* --- PATCH ADDITIONS (GPU / FPS tuning) ---
+ * These toggles are added to bias the driver towards
+ * higher and more stable GPU frequencies to improve FPS.
+ * Default values here are aggressive (favor fps/latency over power):
+ *  - g_disable_fb_dvfs : when 1, the frame-based DVFS (FB_DVFS) logic is skipped.
+ *  - g_force_no_downscale : when 1, the driver will avoid committing a lower
+ *    GPU frequency than the current one (prevents downclocking).
+ *  - g_enable_freq_clamp : when 0 (default here) the code-paths that clamp
+ *    new freq to custom bounds are skipped so higher freqs are allowed.
+ */
+static int g_disable_fb_dvfs = 1; /* 1: disable FB_DVFS - keeps GPU freq stable */
+static int g_force_no_downscale = 1; /* 1: prevent downclocking to maintain FPS */
+static int g_enable_freq_clamp = 0; /* 0: disable clamping to custom bounds */
+/* --- END PATCH ADDITIONS --- */
+
+
 
 unsigned int g_gpu_timer_based_emu;
 unsigned int gpu_bw_err_debug;
@@ -580,11 +604,32 @@ bool ged_dvfs_gpu_freq_commit(unsigned long ui32NewFreqID,
 	unsigned long ui32CurFreqID;
 
 	ui32CurFreqID = mt_gpufreq_get_cur_freq_index();
+
+/* Patched: prevent downclocking if g_force_no_downscale is enabled.
+ * Indexing: lower index => higher frequency (0 is highest freq).
+ * If ui32NewFreqID > ui32CurFreqID then it means a lower frequency is requested.
+ * We clamp such requests back to current index to avoid downclocking.
+ */
+if (g_force_no_downscale) {
+    if (ui32NewFreqID > ui32CurFreqID) {
+        ged_log_buf_print(ghLogBuf_DVFS, GED_LOG_ATTR_TIME,
+            "[GED_K][PATCH] Preventing downclock: keep idx=%lu (requested idx=%lu)\n",
+            (unsigned long)ui32CurFreqID, (unsigned long)ui32NewFreqID);
+        ui32NewFreqID = ui32CurFreqID;
+    }
+}
+
+/* Patched: optionally disable custom clamping to allow higher committed freq.
+ * Original code clamps ui32NewFreqID to g_bottom_freq_id / g_cust_boost_freq_id / g_cust_upbound_freq_id.
+ * When g_enable_freq_clamp == 0, we skip those clamping blocks below so the requested
+ * frequency can be honored (helps raise fps).
+ */
+
 	if (eCommitType == GED_DVFS_DEFAULT_COMMIT)
 		g_last_def_commit_freq_id = ui32NewFreqID;
 	if (ged_dvfs_gpu_freq_commit_fp != NULL) {
 
-		if (ui32NewFreqID > g_bottom_freq_id) {
+		if (g_enable_freq_clamp && (ui32NewFreqID > g_bottom_freq_id)) {
 			ui32NewFreqID = g_bottom_freq_id;
 			g_CommitType = MTK_GPU_DVFS_TYPE_SMARTBOOST;
 			ged_log_perf_trace_counter("gpu_api_boost",
@@ -592,7 +637,7 @@ bool ged_dvfs_gpu_freq_commit(unsigned long ui32NewFreqID,
 				5566, 0, 0);
 		}
 
-		if (ui32NewFreqID > g_cust_boost_freq_id) {
+		if (g_enable_freq_clamp && (ui32NewFreqID > g_cust_boost_freq_id)) {
 			ui32NewFreqID = g_cust_boost_freq_id;
 			g_CommitType = MTK_GPU_DVFS_TYPE_CUSTOMIZATION;
 			ged_log_perf_trace_counter("gpu_cust_floor",
@@ -601,7 +646,7 @@ bool ged_dvfs_gpu_freq_commit(unsigned long ui32NewFreqID,
 		}
 
 		/* up bound */
-		if (ui32NewFreqID < g_cust_upbound_freq_id) {
+		if (g_enable_freq_clamp && (ui32NewFreqID < g_cust_upbound_freq_id)) {
 			ui32NewFreqID = g_cust_upbound_freq_id;
 			g_CommitType = MTK_GPU_DVFS_TYPE_CUSTOMIZATION;
 			ged_log_perf_trace_counter("gpu_cust_ceiling",
@@ -927,8 +972,8 @@ GED_ERROR ged_dvfs_um_commit(unsigned long gpu_tar_freq, bool bFallback)
 }
 
 #ifdef GED_ENABLE_FB_DVFS
-#define DEFAULT_DVFS_MARGIN 100 /* 10% margin */
-#define FIXED_FPS_MARGIN 3 /* Fixed FPS margin: 3fps */
+#define DEFAULT_DVFS_MARGIN 0 /* 0% margin (patched: prefer performance) */
+#define FIXED_FPS_MARGIN 0 /* 0 fps (patched: disabled) */
 
 int gx_fb_dvfs_margin = DEFAULT_DVFS_MARGIN;/* 10-bias */
 
@@ -988,6 +1033,14 @@ static void ged_dvfs_trigger_fb_dvfs(void)
 static int ged_dvfs_fb_gpu_dvfs(int t_gpu, int t_gpu_target,
 	int target_fps_margin, unsigned int force_fallback)
 {
+
+/* Patched: optionally bypass frame-based DVFS (keeps current GPU freq). */
+if (g_disable_fb_dvfs) {
+    if (gpu_debug_enable)
+        GED_LOGE("[GED_K] Patched: FB_DVFS disabled - keeping current GPU freq\n");
+    /* return current frequency (preserve existing return semantics) */
+    return (int)mt_gpufreq_get_cur_freq();
+}
 	int i, i32MaxLevel, gpu_freq_tar, ui32NewFreqID = 0;
 	int ret_freq = -1;
 	static int gpu_freq_pre = -1;

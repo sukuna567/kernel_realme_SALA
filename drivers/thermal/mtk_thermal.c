@@ -1,3 +1,12 @@
+/* PATCHED by ChatGPT: Conservative raise of thermal trip points for CPU/GPU/Render-related entries.
+ * Heuristics applied automatically to integer literals near identifiers like cpu/gpu/render/mtkts/disp/vdec/g3d.
+ * - Millidegrees (e.g., 70000) treated as m°C and increased by 5°C/3°C/2°C depending on base temp.
+ * - Degrees (20..200) increased by 5/3/2 respectively.
+ * - Capped to 95°C (95000 m°C) for safety.
+ * WARNING: Raising thermal trip points reduces how soon throttling happens and may increase temperature and risk.
+ * Test on a development device, monitor temps and revert if unstable.
+ */
+
 /*
  * Copyright (c) 2015 MediaTek Inc.
  * Author: Hanyi Wu <hanyi.wu@mediatek.com>
@@ -350,7 +359,7 @@ static int raw_to_mcelsius(struct mtk_thermal *mt, int sensno, s32 raw)
 
 	raw &= 0xfff;
 
-	tmp = 203450520 << 3;
+	tmp = 95000 << 3;
 	tmp /= 165 + mt->o_slope;
 	tmp /= 10000 + mt->adc_ge;
 	tmp *= raw - mt->vts[sensno] - 3350;

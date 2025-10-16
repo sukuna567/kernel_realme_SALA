@@ -170,3 +170,69 @@ vdso.so: $(obj)/vdso.so.dbg
 	$(call cmd,vdso_install)
 
 vdso_install: vdso.so
+hostprogs-y := $(munge)
+
+c-obj-vdso := vgettimeofday.o
+asm-obj-vdso := sigreturn.o
+
+# Build rules
+targets := $(c-obj-vdso) $(asm-obj-vdso) vdso.so vdso.so.dbg vdso.so.raw
+c-obj-vdso := $(addprefix $(obj)/, $(c-obj-vdso))
+asm-obj-vdso := $(addprefix $(obj)/, $(asm-obj-vdso))
+obj-vdso := $(c-obj-vdso) $(asm-obj-vdso)
+
+obj-y += vdso.o
+extra-y += vdso.lds
+CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
+
+# Force dependency (vdso.s includes vdso.so through incbin)
+$(obj)/vdso.o: $(obj)/vdso.so
+
+include/generated/vdso32-offsets.h: $(obj)/vdso.so.dbg FORCE
+	$(call if_changed,vdsosym)
+
+# Strip rule for vdso.so
+$(obj)/vdso.so: OBJCOPYFLAGS := -S
+$(obj)/vdso.so: $(obj)/vdso.so.dbg FORCE
+	$(call if_changed,objcopy)
+
+$(obj)/vdso.so.dbg: $(obj)/vdso.so.raw $(obj)/$(munge) FORCE
+	$(call if_changed,vdsomunge)
+
+# Link rule for the .so file, .lds has to be first
+$(obj)/vdso.so.raw: $(src)/vdso.lds $(obj-vdso) FORCE
+	$(call if_changed,vdsold)
+
+# Compilation rules for the vDSO sources
+$(filter-out vgettimeofday.o, $(c-obj-vdso)): %.o: %.c FORCE
+	$(call if_changed_dep,vdsocc)
+$(asm-obj-vdso): %.o: %.S FORCE
+	$(call if_changed_dep,vdsoas)
+
+# Actual build commands
+quiet_cmd_vdsold = VDSOL32   $@
+      cmd_vdsold = $(LD_COMPAT) $(VDSO_LDFLAGS) \
+                   -T $(filter %.lds,$^) $(filter %.o,$^) -o $@
+quiet_cmd_vdsocc = VDSOC32   $@
+      cmd_vdsocc = $(CC_ARM32) -Wp,-MD,$(depfile) $(VDSO_CFLAGS) -c -o $@ $<
+quiet_cmd_vdsoas = VDSOA32   $@
+      cmd_vdsoas = $(CC_ARM32) -Wp,-MD,$(depfile) $(VDSO_AFLAGS) -c -o $@ $<
+
+quiet_cmd_vdsomunge = MUNGE   $@
+      cmd_vdsomunge = $(obj)/$(munge) $< $@
+
+# Generate vDSO offsets using helper script (borrowed from the 64-bit vDSO)
+gen-vdsosym := $(srctree)/$(src)/../vdso/gen_vdso_offsets.sh
+quiet_cmd_vdsosym = VDSOSYM $@
+# The AArch64 nm should be able to read an AArch32 binary
+      cmd_vdsosym = $(NM) $< | $(gen-vdsosym) | LC_ALL=C sort > $@
+
+# Install commands for the unstripped file
+quiet_cmd_vdso_install = INSTALL $@
+      cmd_vdso_install = cp $(obj)/$@.dbg $(MODLIB)/vdso/vdso32.so
+
+vdso.so: $(obj)/vdso.so.dbg
+	@mkdir -p $(MODLIB)/vdso
+	$(call cmd,vdso_install)
+
+vdso_install: vdso.so
